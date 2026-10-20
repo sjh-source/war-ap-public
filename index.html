@@ -609,6 +609,9 @@
   .g5-item.done + .g5-line { background: var(--navy-600); }
   .g5-item.current .g5-dot { background: #fff; color: var(--navy); border-color: var(--navy); box-shadow: 0 0 0 3px var(--navy-50); }
   .g5-item.current .g5-label { color: var(--navy-800); font-weight: 700; }
+  /* 더 나중 단계가 실제로 끝났는데 이 단계는 처리 기록이 없는 경우('확인 필요') */
+  .g5-item.gap .g5-dot { background: #fff; color: var(--warn); border-color: var(--warn); }
+  .g5-item.gap .g5-label { color: var(--warn); font-weight: 700; }
   .g5-now { display: flex; flex-wrap: wrap; gap: 10px 28px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
   .g5-now-col { font-size: 12px; }
   .g5-now-col span { display: block; color: var(--muted); margin-bottom: 3px; }
@@ -2753,17 +2756,32 @@ function renderInbox() {
       : '<p class="muted">취소된 Case가 없습니다.</p>');
     return;
   }
+  // 완료 건(취소 아니고 inProgress도 아님 — 보험료 지급 끝나고, NCB 환급 대상이면 환급까지 끝난 Case) 모아보기.
+  // 데이터는 지우지 않고 기본 목록에서만 뺀 것이므로, 여기서 그대로 다시 볼 수 있다.
+  if (inboxStage === 'SETTLED') {
+    const settled = state.cases.filter(c => !c.cancel && !inProgress(c)).sort(byRequested);
+    const notice = `<div class="bar" style="margin-bottom:10px"><span class="badge ok">완료</span>
+      <span class="muted">Case만 보는 중</span><button type="button" class="sub small" data-istage-clear>전체 보기</button></div>`;
+    $('progressList').innerHTML = notice + (settled.length
+      ? `<div class="table-wrap">${progressTable(settled)}</div>`
+      : '<p class="muted">완료된 Case가 없습니다.</p>');
+    return;
+  }
   const all = state.cases.filter(inProgress).sort(byRequested);
   // Dashboard 카드(부보 대기·부보 완료)에서 들어온 필터이므로, 카드 집계와 같은 2단계 기준(salesCoverStage)으로 거른다
   const active = all.filter(c => !inboxStage || salesCoverStage(c) === inboxStage);
   const cancelledCount = state.cases.filter(c => c.cancel).length;
+  const settledCount = state.cases.filter(c => !c.cancel && !inProgress(c)).length;
   const notice = inboxStage ? `<div class="bar" style="margin-bottom:10px"><span class="badge navy">${esc(coverStageName(inboxStage))}</span>
     <span class="muted">만 보는 중</span><button type="button" class="sub small" data-istage-clear>전체 보기</button></div>` : '';
-  // '취소된 Case 보기'는 눈에 덜 띄게 목록 맨 아래 작은 글자로만 둔다(기본 화면에서는 눈에 안 들어오게)
-  const cancelLink = cancelledCount ? `<p class="muted" style="margin-top:10px;font-size:11px"><button type="button" class="btn-text" data-istage-cancel>취소된 Case 보기 (${cancelledCount}건)</button></p>` : '';
+  // '취소된/완료된 Case 보기'는 눈에 덜 띄게 목록 맨 아래 작은 글자로만 둔다(기본 화면에서는 눈에 안 들어오게)
+  const cancelLink = cancelledCount ? `<button type="button" class="btn-text" data-istage-cancel>취소된 Case 보기 (${cancelledCount}건)</button>` : '';
+  const settledLink = settledCount ? `<button type="button" class="btn-text" data-istage-done>완료 Case 보기 (${settledCount}건)</button>` : '';
+  const extraLinks = (cancelLink || settledLink)
+    ? `<p class="muted" style="margin-top:10px;font-size:11px">${[cancelLink, settledLink].filter(Boolean).join(' · ')}</p>` : '';
   $('progressList').innerHTML = notice + (active.length
     ? `<div class="table-wrap">${progressTable(active)}</div>`
-    : `<p class="muted">${inboxStage ? '이 상태의 Case가 없습니다.' : '진행 중인 Case가 없습니다.'}</p>`) + cancelLink;
+    : `<p class="muted">${inboxStage ? '이 상태의 Case가 없습니다.' : '진행 중인 Case가 없습니다.'}</p>`) + extraLinks;
 }
 
 // Case 관리: 전체 Case (종결 포함)
@@ -3199,6 +3217,7 @@ function initCaseDetail() {
   $('progressList').addEventListener('click', e => {
     if (e.target.closest('[data-istage-clear]')) { inboxStage = ''; ensureInboxPick(); renderInbox(); renderCaseDetail(); return; }
     if (e.target.closest('[data-istage-cancel]')) { inboxStage = 'CANCELLED'; renderInbox(); return; }
+    if (e.target.closest('[data-istage-done]')) { inboxStage = 'SETTLED'; renderInbox(); return; }
     const t = e.target.closest('[data-pick]');
     if (t) pickInbox(t.getAttribute('data-pick'));
   });
@@ -3496,7 +3515,7 @@ function bindCaseDetail(box) {
   // 업무 흐름 처리: 견적 전달·부보확정·HRA 진입·진출·인보이스·최종보험료·송금
   const FLOW_ACTS = ['quote-share', 'cover-confirm', 'hra-in-confirm', 'hra-out-confirm',
     'sched-change-ack', 'g5-select', 'pay-edit', 'pay-cancel', 'pay-save', 'refund-edit', 'refund-cancel', 'refund-save',
-    'qm-discard', 'cancel-confirm'];
+    'qm-discard', 'cancel-confirm', 'gmail-sync-now'];
   box.addEventListener('click', e => {
     const b = e.target.closest(FLOW_ACTS.map(a => `[data-act="${a}"]`).join(', '));
     const c = caseId ? findCase(caseId) : null;
@@ -3505,7 +3524,10 @@ function bindCaseDetail(box) {
     const err = t => { msg.className = 'msg err'; msg.textContent = t; };
     const step = (to, why) => { addHistory(c, '진행단계', `${c.step}. ${stepName(c.step)}`, `${to}. ${stepName(to)}${why ? ' — ' + why : ''}`); c.step = to; };
     const act = b.dataset.act;
-    if (act === 'sched-change-ack') {
+    if (act === 'gmail-sync-now') {
+      refreshGmailSync(true);   // 완료되면 refreshGmailSync 안에서 직접 다시 그린다 — 여기서 더 처리할 게 없음
+      return;
+    } else if (act === 'sched-change-ack') {
       // 변경 스케줄 확인: 담당자가 직접 눌렀을 때만 닫는다(Case를 열어봤다는 사실만으로는 자동 처리하지 않음)
       resolveNotifications(c.id, 'SCHED_CHANGE', currentUser.name);
       addHistory(c, '변경 스케줄 확인', '', `${esc(currentUser.name)} ${esc(nowStr())}`);
@@ -4044,7 +4066,7 @@ function openStage(k) {
 
 /* ---------- HRA 진입 전 알림 (기획/ESG팀 대시보드) ----------
    아직 부보 요청 전(WAIT)이면 D-3부터 '부보 요청 필요'로 통일 표시.
-   부보를 요청한 뒤(ING)엔 — 3일 전: 최신 스케줄 확인 / 1일 전: 부보 확정 여부 확인 / 당일: HRA 진입 예정 / 지났는데 미확정: 긴급 확인 필요.
+   부보를 요청한 뒤(ING)엔 — 3일 전: 최신 스케줄 확인 / 1일 전: 부보 확정 여부 확인 / 당일: HRA 진입 예정 / 지났으면: HRA 진입 확인(정보, 경고 아님).
    날짜와 함께 부보 상태(확정 여부)를 보고, 미확정이면 더 강하게 표시한다. 단계는 자동으로 바꾸지 않는다 */
 // 날짜 기준 + AIS 기준 알림 중 더 심각한 것 하나
 function hraAlertOf(c) {
@@ -4054,14 +4076,11 @@ function hraAlertOf(c) {
   list.sort((x, y) => rank[x.level] - rank[y.level]);
   return list[0] || null;
 }
-// AIS 기준: 경계 접근 / HRA 진입 확인 / HRA 진출 확인. 진입했는데 부보 미확정이면 긴급
+// AIS 기준: 경계 접근 / HRA 진입 확인 / HRA 진출 확인.
 function aisAlertOf(c) {
   const a = c.ais;
   if (!a || c.step > 12) return null;
   const conf = !!c.coverConfirm;
-  if ((a.status === 'IN' || a.status === 'INSIDE') && !conf) {
-    return { level: 'danger', title: '긴급 확인 필요', why: `AIS 기준 HRA 진입 확인 ${a.actualIn ? a.actualIn.at : ''} · 부보 미확정` };
-  }
   if ((a.status === 'IN' || a.status === 'INSIDE') && c.step < 9) {
     return { level: 'warn', title: 'HRA 진입 확인 (AIS)', why: `AIS 기준 진입 ${a.actualIn ? a.actualIn.at : ''} · 진행단계 확인 필요` };
   }
@@ -4084,8 +4103,7 @@ function dateAlertOf(c) {
     return { level: 'danger', title: '부보 요청 필요', why };
   }
   const conf = !!c.coverConfirm;
-  if (d < 0) return conf ? { level: 'info', title: 'HRA 진입 확인', why: `진입 예정일 ${-d}일 경과 · 부보 확정됨` }
-    : { level: 'danger', title: '긴급 확인 필요', why: `진입 예정일 ${-d}일 경과 · 부보 미확정` };
+  if (d < 0) return { level: 'info', title: 'HRA 진입 확인', why: `진입 예정일 ${-d}일 경과 · ${conf ? '부보 확정됨' : '부보 미확정'}` };
   if (d === 0) return conf ? { level: 'info', title: 'HRA 진입 예정', why: '오늘 진입 · 부보 확정됨' }
     : { level: 'danger', title: 'HRA 진입 예정', why: '오늘 진입 · 부보 미확정' };
   if (d === 1) return conf ? { level: 'info', title: '부보 확정 여부 확인', why: '진입 1일 전 · 부보 확정됨' }
@@ -4992,6 +5010,13 @@ function fmtMoney(minor, cur) {
     : `USD ${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 // 기본 부보 일수: HRA 진입일~진출일 달력 일수 (양 끝 포함)
+// Rate Period(보험사 제시 요율 적용 기간)보다 실제 HRA Duration이 길면, Pro Rata 적용 여부를 이미 골랐어도
+// 보험사 재확인이 필요하다는 경고를 보여준다 — No Pro Rata라고 해서 긴 기간을 그냥 승인 처리하지 않기 위함.
+// 특정 선박 전용이 아니라 ratePeriod·days 값만 보고 판단하므로 모든 선박·항차·보험사에 공통 적용된다.
+function rateReconfirmWarningHtml(p) {
+  if (!(p.ratePeriod > 0 && p.days > p.ratePeriod)) return '';
+  return `<p class="pending" style="grid-column:1 / -1">보험사 제시 요율 적용 조건은 ${esc(p.ratePeriod)}일 이내이나, 현재 HRA 운항 기간은 ${esc(p.days)}일입니다. 요율 및 담보 기간에 대한 보험사 재확인이 필요합니다.</p>`;
+}
 function defaultDays(c) {
   if (!isValidDate(c.entryDate) || !isValidDate(c.exitDate)) return null;
   const ms = d => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10));
@@ -5546,11 +5571,11 @@ function stepperHtml(c) {
    하나씩 독립적으로 완료 여부를 판단한다 — 순서대로 진행되지 않은 기존 Case도 단계별로 올바르게 표시된다. */
 const PROGRESS5_LABELS = ['견적 요청', '견적 확인', '부보 확정', '최종 스케줄 전달', '보험료 지급', 'NCB 환급'];
 function progress5Items(c) {
-  const coverSent = !!(c.coverMail && c.coverMail.sentAt);
+  // '부보 확정'(3단계)은 보험사 실제 확정(coverConfirm)만 완료로 본다 — 'WAR AP 부보 요청' 메일을 보낸
+  // 것만으로는 완료로 보지 않는다(이전엔 메일 발송도 완료로 쳤는데, 그러면 메일만 보내도 화면에 '부보
+  // 확정'으로 보여 실제 확정 전인데 확정된 것처럼 보이는 문제가 있었음 — 이 부분만 고침).
   const coverDone = !!c.coverConfirm;
-  // 'WAR AP 부보 요청' 메일을 전송 완료 처리하면(또는 실제 확정되면) 당사의 부보 요청 업무는 끝난 것으로 보고
-  // 그 이전 단계(견적 요청·견적 확인)도 함께 완료로 표시한다 — 보험사 실제 확정 여부(coverDone)는 그대로 따로 둔다.
-  const requestDone = coverSent || coverDone;
+  const requestDone = coverDone;
   const quoteSent = requestDone || !!(c.quoteMail && c.quoteMail.sentAt);
   // 2단계(견적 확인) 완료 기준은 기획/ESG팀의 '보험료 산출 내역 저장'이다 — 영업팀의 견적 확인(c.quoteAck)은
   // 참고 정보일 뿐 완료 조건이 아니다. 영업팀이 확인하지 않아도 기획팀은 3단계(부보 확정)로 진행할 수 있어야 한다.
@@ -5559,34 +5584,36 @@ function progress5Items(c) {
   // 5단계(보험료 지급)는 실제 지급 여부·지급일자 기준. 6단계(NCB 환급)는 보험료 지급과는 별개 업무라 따로 완료를 본다 —
   // 환급 대상 자체가 없으면(KB 후할인 조건 없음) 기다릴 게 없으므로 바로 완료로 본다.
   const paidDone = !!(c.paid && c.paid.payDate);
-  const refundDone = !ncbRefundTarget(c) || !!c.refundDone;
-  const rawDone = [quoteSent, quoteDone, requestDone, finalSent, paidDone, refundDone];
-  // 반드시 순서대로 진행 — 뒷단계 조건(예: 'NCB 환급 대상 없음'이라 refundDone이 저절로 true)이 먼저 갖춰져 있어도,
-  // 그 앞의 단계가 아직 안 끝났으면 완료로 치지 않는다. 한 단계라도 안 끝나면 그 뒤는 전부 미완료로 묶는다.
-  const done = [];
-  let brokenAt = -1;
-  for (let i = 0; i < rawDone.length; i++) {
-    if (brokenAt === -1 && !rawDone[i]) brokenAt = i;
-    done.push(brokenAt === -1);
-  }
-  let idx = done.findIndex(d => !d);
-  if (idx === -1) idx = done.length;
-  return { done, idx, allDone: idx === done.length };
+  // NCB 환급은 보험료 지급이 끝나야 의미가 있다 — 지급 전인데 '환급 대상 없음'이라고 먼저 완료로 치지 않는다.
+  const refundDone = paidDone && (!ncbRefundTarget(c) || !!c.refundDone);
+  const done = [quoteSent, quoteDone, requestDone, finalSent, paidDone, refundDone];
+  // '현재 상태' = 실제로 가장 나중에 끝난 업무의 '다음' 단계. 예: 보험료 지급(5단계)까지 끝났으면 자동으로
+  // 6단계(NCB 환급)가 '지금 진행 중'이 된다(5단계에 멈춰 있지 않음). 끝난 단계는 done[]에서 그대로 ✓로 남는다.
+  // 부보 확정처럼 중간에 비어 있는 단계는 '현재' 뒤로 밀려나지 않고 gaps에 담겨 '확인 필요'로 따로 표시된다
+  // (임의로 완료 처리하지 않음 — 순서를 벗어난 실제 업무만 앞서 보여줄 뿐, 빈 단계를 메우지는 않는다).
+  let lastTrue = -1;
+  for (let i = 0; i < done.length; i++) { if (done[i]) lastTrue = i; }
+  const idx = Math.min(lastTrue + 1, done.length - 1);
+  const gaps = [];
+  for (let i = 0; i < idx; i++) { if (!done[i]) gaps.push(i); }
+  return { done, idx, gaps, allDone: done.every(Boolean) };
 }
 // 5단계(보험료 지급)·6단계(NCB 환급)일 때만 괄호 안에 실제 처리 상태를 더한다. 그 외 단계는 null(단계명만 표시) —
 // 임의로 지어내지 않고 실제 저장된 c.paid/c.refundDone/환급 대상 여부를 그대로 읽는다.
 function stagePayRefundSuffix(c, idx) {
-  if (idx === 4) return (c.paid && c.paid.payDate) ? '지급 완료' : '미지급';
-  if (idx === 5) return !ncbRefundTarget(c) ? '대상 없음' : (c.refundDone ? '환급 완료' : '미환급');
+  if (idx === 4) return (c.paid && c.paid.payDate) ? '완료' : '미지급';
+  if (idx === 5) return !ncbRefundTarget(c) ? '대상 없음' : (c.refundDone ? '완료' : '미환급');
   return null;
 }
 // WAR AP 관리 목록 '현재 상태' 컬럼 전용 — 세부 처리 결과('정산 완료'·'인보이스 요청' 등)는 쓰지 않고, 상단 진행
 // 현황 1~6단계 명칭만 보여준다(번호 생략). 5·6단계는 괄호로 실제 처리 상태를 더해 한 줄로 보여준다 —
 // 미지급·미환급은 주의색, 지급/환급 완료·대상 없음은 완료색으로 글자색만 구분한다(배지 모양은 추가하지 않음).
+// Management 목록과 Case 상세 화면(groupBarHtml 등)이 항상 같은 값을 보도록, 두 화면 모두 progress5Items(c).idx
+// 하나만 기준으로 삼는다 — 가장 나중에 실제로 끝난 업무를 그대로 보여준다(순서를 벗어나 보험료가 먼저 지급된
+// 경우도 그 사실을 가린다). 건너뛴 앞 단계는 Case 상세의 단계 막대에서 '확인 필요'로 따로 표시된다.
 function currentStageLabel(c) {
   if (c.cancel) return `<span style="color:var(${c.cancel.status === 'REQUESTED' ? '--warn' : '--muted'});font-weight:600">${esc(caseCancelLabel(c))}</span>`;
-  const p = progress5Items(c);
-  const idx = Math.min(p.idx, PROGRESS5_LABELS.length - 1);
+  const idx = Math.min(progress5Items(c).idx, PROGRESS5_LABELS.length - 1);
   const label = esc(PROGRESS5_LABELS[idx]);
   const suffix = stagePayRefundSuffix(c, idx);
   if (!suffix) return label;
@@ -5606,9 +5633,11 @@ function groupBarHtml(c) {
   // 영업팀이 '부보 요청으로 전환'하면 c.requestType이 'COVER'로 바뀌어 다음에 열 때부터 전체 6단계가 그대로 보인다.
   const labels = c.requestType === 'QUOTE' ? PROGRESS5_LABELS.slice(0, 2) : PROGRESS5_LABELS;
   const items = labels.map((label, i) => {
-    const st = p.done[i] ? 'done' : i === p.idx ? 'current' : 'wait';
-    return `<div class="g5-item ${st}${i === sel ? ' selected' : ''}" data-act="g5-select" data-idx="${i}" role="button" tabindex="0">` +
-      `<div class="g5-dot">${p.done[i] ? '✓' : i + 1}</div><div class="g5-label">${esc(label)}</div></div>`;
+    const isGap = p.gaps.includes(i);   // 더 나중 단계가 끝났는데 이 단계는 처리 기록이 없음 — 확인 필요
+    const st = p.done[i] ? 'done' : i === p.idx ? 'current' : isGap ? 'gap' : 'wait';
+    const dot = p.done[i] ? '✓' : isGap ? '!' : i + 1;
+    return `<div class="g5-item ${st}${i === sel ? ' selected' : ''}" data-act="g5-select" data-idx="${i}" role="button" tabindex="0"${isGap ? ' title="확인 필요 — 처리 기록 없음"' : ''}>` +
+      `<div class="g5-dot">${dot}</div><div class="g5-label">${esc(label)}${isGap ? ' <span style="color:var(--warn)">(확인 필요)</span>' : ''}</div></div>`;
   }).join('<div class="g5-line"></div>');
   return `<div class="g5-bar">${items}</div>`;
 }
@@ -5736,6 +5765,7 @@ function groupDetailHtml(c) {
   if (sel === 5) return `<section class="act-panel"><h2>처리 · NCB 환급</h2>${refundStepHtml(c, !p.done[4])}<span class="msg" id="actMsg"></span></section>`;
   if (sel === p.idx) return stepActionHtml(c);
   if (p.done[sel]) return groupStepSummaryHtml(c, sel);
+  if (p.gaps.includes(sel)) return `<p class="muted">이 단계는 처리 기록이 없는데, 더 뒤 단계가 이미 진행돼 있습니다(확인 필요). 실제로 처리된 일이면 해당 작업(예: 「부보 확정 처리」)을 눌러 기록해 주세요.</p>`;
   return '<p class="muted">이전 단계 완료 후 처리 가능합니다.</p>';
 }
 
@@ -5796,15 +5826,22 @@ function stepActionHtml(c) {
 }
 
 // 저장된 c.premium → 입력칸(p) 모양으로 되돌린다. 산출 화면과 Case 관리 기록 보기가 같은 계산을 함께 쓴다
+// 담당자가 아직 한 번도 「산출 저장」을 안 눌렀으면(saved.rate 등이 비어 있으면), Gmail에서 찾은 초안(c.quoteDraft)을
+// 입력칸 기본값으로 바로 보여준다 — 버튼을 눌러야만 반영되는 게 아니라 화면을 열면 이미 채워져 있다. 한 번이라도
+// 저장된 값(saved)이 있으면 그걸 그대로 쓰고 초안으로 덮어쓰지 않는다(담당자가 확정·수정한 값은 보존).
 function premiumInputsFromSaved(c) {
   const saved = c.premium || {};
+  const draft = (c.quoteDraft && c.quoteDraft.terms) || {};
+  // Gross Rate·NCB 할인율은 0%가 실제로 확정된 값일 수 없다(전쟁위험 요율이 0%일 수 없고, NCB 0%는
+  // "선할인 없음"을 직접 입력했을 때만 나오는데 그 경우는 거의 없다) — 0으로 저장돼 있으면 아직 입력을
+  // 안 한 상태로 보고, Gmail에서 찾은 값이 있으면 그걸 보여준다. 0보다 큰 값은 그대로 확정값으로 지킨다.
   return {
-    rate: saved.rate != null ? saved.rate : null,
-    ratePeriod: saved.ratePeriod != null ? saved.ratePeriod : 7,
+    rate: saved.rate > 0 ? saved.rate : (draft.grossRate != null ? draft.grossRate : null),
+    ratePeriod: saved.ratePeriod != null ? saved.ratePeriod : (draft.ratePeriod != null ? draft.ratePeriod : 7),
     days: saved.days != null ? saved.days : defaultDays(c),
-    method: saved.method || '',
+    method: saved.method || draft.proRata || '',
     grossOverride: saved.grossOverride != null ? saved.grossOverride : null,
-    preRate: saved.preRate != null ? saved.preRate : null,
+    preRate: saved.preRate > 0 ? saved.preRate : (draft.upfrontNcbPct != null ? draft.upfrontNcbPct : null),
     preAmountOverride: saved.preAmountOverride != null ? saved.preAmountOverride : null,
     // HRA 진입 회차: 저장된 값이 있으면 그대로, 처음이면 기존 방식(선박·보험연도 순번)으로 기본값만 보여준다 — 담당자가 직접 고칠 수 있음
     seq: saved.seq != null ? saved.seq : (hraSeqOf(c) ? hraSeqOf(c).seq : null),
@@ -5895,6 +5932,7 @@ function meritzPremiumPanelHtml(c, si, p, r) {
             <option value="PRORATA"${p.method === 'PRORATA' ? ' selected' : ''}>Pro Rata 적용</option>
             <option value="NOPRORATA"${p.method === 'NOPRORATA' ? ' selected' : ''}>Pro Rata 불가</option>
           </select></label>
+        ${rateReconfirmWarningHtml(p)}
         <label class="field"><span>NCB 할인율 (%)</span><input type="number" id="pmPre" step="any" min="0" max="100" value="${p.preRate != null ? esc(p.preRate) : ''}"></label>
       </div>
       <details class="pm-advanced"><summary>NCB 할인 금액 직접 입력 · 보험사 제시 Gross Premium 직접 입력 (선택)</summary>
@@ -5961,6 +5999,7 @@ function premiumPanelHtml(c) {
               <option value="PRORATA"${p.method === 'PRORATA' ? ' selected' : ''}>Pro Rata 적용</option>
               <option value="NOPRORATA"${p.method === 'NOPRORATA' ? ' selected' : ''}>Pro Rata 불가</option>
             </select></label>
+          ${rateReconfirmWarningHtml(p)}
         </div>
         <details class="pm-advanced"><summary>보험사 제시 Gross Premium 직접 입력 (선택)</summary>
           <input type="number" id="pmGrossOverride" step="0.01" min="0" value="${p.grossOverride != null ? esc(p.grossOverride) : ''}"></details>
@@ -6017,7 +6056,7 @@ function premiumPanelHtml(c) {
 const GMAIL_SYNC_SOURCE = { relayUrl: 'http://localhost:8788' };
 const GMAIL_SYNC_SET_KEY = 'war-ap.gmailSync.v1';
 const GMAIL_SYNC_ERRORS = {
-  RELAY_DOWN: 'gmail-sync 로컬 서버(server.js)가 실행 중이 아닙니다',
+  RELAY_DOWN: 'gmail-sync 로컬 서버(gmail-sync-relay.ps1)가 실행 중이 아닙니다',
   NOT_AUTHED: 'Google 계정 인증이 아직 안 됐습니다 — 안내된 절차대로 인증하세요',
   AUTH_EXPIRED: '인증이 끊어졌습니다 — 다시 인증하세요',
   API_ERROR: 'Gmail API 호출 실패'
@@ -6030,6 +6069,7 @@ function gmailSyncSettings() {
 }
 function saveGmailSyncSettings(patch) { storageSet(GMAIL_SYNC_SET_KEY, JSON.stringify(Object.assign(gmailSyncSettings(), patch))); }
 // 화면에 보여줄 연동 상태 한 줄 — 실제로 확인에 성공/실패했는지에 따라서만 문구를 정하고, 확인 전에는 '연결 완료'라고 하지 않는다
+// (공개 데모판: 사내 Gmail 계정 운영 방식에 대한 설명은 제외)
 function gmailSyncStatusInfo() {
   const gs = gmailSyncSettings();
   const lastText = gs.lastFetch ? new Date(gs.lastFetch).toLocaleTimeString('ko-KR') : '-';
@@ -6046,10 +6086,14 @@ function gmailSyncStatusInfo() {
 let gmailSyncBusy = false;
 // 로컬 서버에 지금 Case 목록(선박명·항차·보험사만 — 민감한 보험료 정보는 보내지 않음)을 보내고,
 // 그걸 기준으로 매칭된 새 견적 메일이 있으면 받아와 반영한다.
-async function refreshGmailSync() {
-  if (gmailSyncBusy || !currentUser || currentUser.team !== 'PLAN') return;
+// 소속(영업팀/기획·ESG팀)을 가리지 않는다 — 영업팀이 신규 Case를 등록한 그 자리에서 바로 한 번
+// 찾아보기 위함(아래 '신규 요청 전송' 쪽 호출 참고). 로컬 서버가 그 PC에 없으면(대부분의 영업팀 PC가
+// 그렇다) 조용히 실패할 뿐이라 안전하다 — 평소 10분 주기 자동 확인은 기획/ESG팀일 때만 돈다(별도 제한,
+// startGmailSyncTimer 참고).
+async function refreshGmailSync(force) {
+  if (gmailSyncBusy || !currentUser) return;
   gmailSyncBusy = true;
-  renderCaseDetail();   // 지금 확인 중임을 바로 화면에 반영 ('견적 메일 확인 중…')
+  renderCaseDetail();
   try {
     const cases = state.cases.filter(c => c.vessel && c.voyage)
       .map(c => ({ id: c.id, vessel: c.vessel, voyage: c.voyage, insurer: c.insurer || vesselInsurer(c.vessel) }));
@@ -6059,26 +6103,33 @@ async function refreshGmailSync() {
     try {
       const r = await fetch(`${GMAIL_SYNC_SOURCE.relayUrl}/api/sync`, {
         method: 'POST', signal: ctl.signal, cache: 'no-store',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cases })
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cases, force: !!force })
       });
       data = await r.json().catch(() => null);
-      if (!data) { gmailConn = { ok: false, code: 'API_ERROR', msg: `HTTP ${r.status}`, lastOutcome: null }; return; }
-      if (!data.ok) { gmailConn = { ok: false, code: GMAIL_SYNC_ERRORS[data.code] ? data.code : 'API_ERROR', msg: data.error || '', lastOutcome: null }; return; }
+      if (!data) { gmailConn = { ok: false, code: 'API_ERROR', msg: `HTTP ${r.status}`, lastOutcome: null }; console.warn('[Gmail 연동]', gmailConn); return; }
+      if (!data.ok) { gmailConn = { ok: false, code: GMAIL_SYNC_ERRORS[data.code] ? data.code : 'API_ERROR', msg: data.error || '', lastOutcome: null }; console.warn('[Gmail 연동]', gmailConn); return; }
     } catch (err) {
-      gmailConn = { ok: false, code: 'RELAY_DOWN', msg: '', lastOutcome: null };   // 연결 자체가 안 됨(서버 꺼짐)
+      // 화면에는 띄우지 않는다(요청에 따름) — gmail-sync 서버가 꺼져 있거나 인증이 끊긴 경우로, 콘솔로만 남긴다.
+      gmailConn = { ok: false, code: 'RELAY_DOWN', msg: '', lastOutcome: null };
+      console.warn('[Gmail 연동] 로컬 서버 연결 실패 — gmail-sync-relay.ps1이 켜져 있는지 확인하세요.', err);
       return;
     } finally {
       clearTimeout(timer);
     }
     let changed = false;
-    // 받은 순서(Gmail이 준 순서)가 아니라 실제 수신일시 오래된 것 → 최신 것 순으로 적용한다 — 같은 Case에
-    // 일치하는 메일이 여러 건이면 항상 '가장 최신' 내용이 마지막에 반영되어 최종 상태가 되도록 한다.
-    const ordered = (data.updates || []).slice().sort((a, b) => String(a.receivedAt).localeCompare(String(b.receivedAt)));
-    for (const u of ordered) {
+    // 서버가 돌려주는 건 '이번에 새로 찾은 것'이 아니라 Case마다 지금까지 보존된 결과 전체다(서버의
+    // Save-CaseUpdate 참고) — 몇 번을 다시 물어도 같은 결과를 받으므로, 여기서 적용 여부(changed)는
+    // applyGmailUpdate의 내용 비교로만 가린다.
+    const updates = data.updates || [];
+    for (const u of updates) {
       const c = u && u.caseId ? findCase(u.caseId) : null;
       if (c && applyGmailUpdate(c, u)) changed = true;
     }
-    gmailConn = { ok: true, code: '', msg: '', lastOutcome: changed ? 'REGISTERED' : 'NO_MATCH' };
+    // '새로 반영됨'·'이미 반영된 것과 같음(새 변경 없음)'·'분석된 조건 자체가 없음'을 구분해 로그에 남긴다.
+    const outcome = changed ? 'REGISTERED' : (updates.length ? 'UP_TO_DATE' : 'NO_DATA');
+    gmailConn = { ok: true, code: '', msg: '', lastOutcome: outcome };
+    const outcomeText = { REGISTERED: '조건 반영됨', UP_TO_DATE: '이미 반영된 조건과 동일 (새 변경 없음)', NO_DATA: '분석된 보험 조건 없음(일치하는 메일을 못 찾음)' }[outcome];
+    console.log('[Gmail 연동] 확인 완료 —', outcomeText);
     if (changed) persist();
   } finally {
     saveGmailSyncSettings({ lastFetch: Date.now() });
@@ -6089,33 +6140,48 @@ async function refreshGmailSync() {
 }
 // Warranty·담보 조건은 선박명·항차가 모두 확인된(vesselMatch && voyageMatch) 메일만 자동 등록한다 — 원문 그대로 보존하고
 // 바뀌기 전 내용은 이력(c.warrantyHistory)에 남긴다. Gross/Net Rate·NCB 같은 보험료 숫자는 매칭이 확실해도 저장된 보험료
-// 산출 결과를 바로 덮어쓰지 않고, 담당자가 "보험료 산출 화면에 채우기"로 확인·반영해야 하는 초안(c.quoteDraft)으로만 둔다.
-// msgId로 중복 여부를 가려 같은 메일을 다시 받아도 두 번 반영하지 않는다.
+// 산출 결과를 바로 덮어쓰지 않고, 담당자가 확인·반영해야 하는 초안(c.quoteDraft)으로만 둔다.
+// "메일을 봤다"는 사실(msgId)로 다시 반영을 영구히 막지 않는다 — 실제로 내용이 지금 저장된 것과 달라졌을
+// 때만 다시 반영한다. (예전엔 msgId 하나로 영구 차단해서, 추출 로직을 나중에 고쳐도 같은 메일에서는 다시
+// 못 받았다 — 메일을 분석했다는 사실과 Case에 실제로 반영됐다는 사실이 같지 않은데 같게 취급한 게 문제였음.
+// 아래는 내용이 같으면("이미 반영됨") 건너뛰고, 다르면("아직 반영 안 됐거나 바뀜") 다시 반영한다.)
 function applyGmailUpdate(c, u) {
-  if ((c.gmailAppliedMsgIds || []).includes(u.msgId)) return false;
-  c.gmailAppliedMsgIds = [...(c.gmailAppliedMsgIds || []), u.msgId].slice(-200);
   const confident = !!(u.vesselMatch && u.voyageMatch);
   const warrantyText = String(u.warrantyText || '').trim();
   let applied = false;
+  const warrantyAlreadyApplied = !!(c.warranty && c.warranty.msgId === u.msgId && c.warranty.text === warrantyText);
   // 담당자가 Warranty를 수동으로 고정해 두면(c.warrantyManualLock) Gmail이 이후에 뭘 찾아내도 이 텍스트는
   // 덮어쓰지 않는다 — 보험료 조건 초안(c.quoteDraft)은 이 잠금과 무관하게 계속 갱신된다.
-  if (confident && warrantyText && !c.warrantyManualLock) {
+  if (confident && warrantyText && !c.warrantyManualLock && !warrantyAlreadyApplied) {
     if (c.warranty) c.warrantyHistory = [...(c.warrantyHistory || []), c.warranty];
     c.warranty = { text: warrantyText, savedAt: u.receivedAt || nowStr(), savedBy: 'Gmail 자동 등록', receivedAt: u.receivedAt || '', from: u.from || '', msgId: u.msgId };
     addHistory(c, 'Warranty 및 담보 조건 자동 등록 (Gmail)', (c.warrantyHistory || []).length ? '이전 조건 있음(이력 보존)' : '', `발신 ${u.from || '-'} · 수신 ${u.receivedAt || '-'}`, 'Gmail 연동', '');
     pushNotification(c, 'QUOTE_UPDATE', `보험사 견적 회신에서 Warranty·담보 조건이 자동 등록되었습니다 (${u.from || '발신자 미상'}).`, 'PLAN', '', 'Gmail 연동');
     applied = true;
   }
-  const terms = u.terms || {};
-  const hasTerms = Object.values(terms).some(v => v != null && v !== '');
-  if (hasTerms) {
-    c.quoteDraft = { rawText: u.rawText || '', pastedAt: u.receivedAt || nowStr(), pastedBy: 'Gmail 자동 연동',
-      vesselMatch: !!u.vesselMatch, voyageMatch: !!u.voyageMatch, terms,
-      receivedAt: u.receivedAt || '', from: u.from || '' };
-    pushNotification(c, 'QUOTE_UPDATE', confident
-      ? `보험사 견적 조건이 갱신되었습니다 — 보험료 산출 확인이 필요합니다 (${u.from || '발신자 미상'}).`
-      : `선박명·항차 확인이 필요한 견적 메일이 있습니다 (${u.from || '발신자 미상'}).`, 'PLAN', '', 'Gmail 연동');
-    applied = true;
+  const incoming = u.terms || {};
+  const hasTerms = Object.values(incoming).some(v => v != null && v !== '');
+  const attachmentNote = String(u.attachmentNote || '').trim();
+  if (hasTerms || attachmentNote) {
+    // 같은 건에 메일이 여러 번 오가면(스케줄 변경·재송부 등) 항목별로 병합한다 — 가장 최근 메일이 그 항목을
+    // 언급하지 않았다고 해서(예: 뒤에 온 메일이 Net Endorsement만 재첨부) 이미 찾아 둔 값을 지우지 않는다.
+    // 실제로 같은 항목에 새 값이 있으면(견적이 진짜 바뀐 경우) 그 값으로 바뀐다 — 무시하지 않는다.
+    const prevTerms = (c.quoteDraft && c.quoteDraft.terms) || {};
+    const terms = {};
+    new Set([...Object.keys(prevTerms), ...Object.keys(incoming)]).forEach(k => {
+      terms[k] = (incoming[k] != null && incoming[k] !== '') ? incoming[k] : (prevTerms[k] != null ? prevTerms[k] : null);
+    });
+    const prevNote = (c.quoteDraft && c.quoteDraft.attachmentNote) || '';
+    const termsAlreadyApplied = JSON.stringify(terms) === JSON.stringify(prevTerms) && attachmentNote === prevNote;
+    if (!termsAlreadyApplied) {
+      c.quoteDraft = { rawText: u.rawText || '', pastedAt: u.receivedAt || nowStr(), pastedBy: 'Gmail 자동 연동',
+        vesselMatch: !!u.vesselMatch, voyageMatch: !!u.voyageMatch, terms, attachmentNote,
+        receivedAt: u.receivedAt || '', from: u.from || '' };
+      pushNotification(c, 'QUOTE_UPDATE', confident
+        ? `보험사 견적 조건이 갱신되었습니다${attachmentNote ? ' (첨부파일에서 찾음)' : ''} — 보험료 산출 확인이 필요합니다 (${u.from || '발신자 미상'}).`
+        : `선박명·항차 확인이 필요한 견적 메일이 있습니다 (${u.from || '발신자 미상'}).`, 'PLAN', '', 'Gmail 연동');
+      applied = true;
+    }
   }
   return applied;
 }
@@ -6132,11 +6198,36 @@ function startGmailSyncTimer() {
   if (Date.now() - s.lastFetch > 10 * 60000) setTimeout(refreshGmailSync, 2000);
 }
 
-// Gmail 자동 조회·매칭(gmail-sync 로컬 서버)과 보험료 조건 초안(c.quoteDraft) 추출은 내부적으로 계속 동작하되,
-// 기획/ESG팀 화면에는 'Warranty 담보 조건'만 간결하게 보여준다 — 발신자·수신일시·메일 원문·연동 상태 문구는 표시하지 않는다.
-// (c.quoteDraft 데이터 자체는 지우지 않고 그대로 유지된다 — 화면에서만 뺌)
+// Gmail 자동 조회·매칭(gmail-sync 로컬 서버)으로 찾은 요율 초안(c.quoteDraft)이 있으면 배너로 보여준다.
+// 담당자가 한 번도 저장 안 한 상태라면 이 값이 이미 보험료 산출 입력칸에 기본값으로 들어가 있다
+// (premiumInputsFromSaved 참고 — 버튼을 눌러야만 반영되는 게 아니라 화면을 열면 바로 보임). 그래도 최종
+// 확정은 「산출 저장」을 눌러야 한다(메일에서 찾았다는 이유로 자동 확정·저장완료 처리하지 않음). 「채우기」는
+// 입력칸을 편집하다 이 초안으로 다시 되돌리고 싶을 때 쓰고, 「무시」는 이 초안을 더 이상 보여주지 않는다.
+function quoteDraftBannerHtml(c) {
+  const d = c.quoteDraft;
+  if (!d) return '';
+  const t = d.terms || {};
+  const parts = [];
+  if (t.grossRate != null) parts.push(`Gross Rate ${t.grossRate}%`);
+  if (t.netRate != null) parts.push(`Net Rate ${t.netRate}%`);
+  if (t.ratePeriod != null) parts.push(`Rate Period ${t.ratePeriod}일`);
+  if (t.upfrontNcbPct != null) parts.push(`Upfront NCB ${t.upfrontNcbPct}%`);
+  if (t.proRata) parts.push(`Pro Rata ${t.proRata === 'PRORATA' ? '적용' : '미적용'}`);
+  const summary = parts.length ? parts.join(' · ') : (d.attachmentNote ? '(요율 숫자는 못 찾음 — 아래 문구만 참고)' : '');
+  return `<div class="msg" style="background:var(--navy-50);border:1px solid var(--line-strong);border-radius:var(--r);padding:10px 12px;margin-bottom:10px">
+    <div style="font-weight:600">보험사 견적 메일에서 찾은 조건 — 아래 보험료 산출 입력칸에 이미 반영됨(확인 필요) · 발신 ${esc(d.from || '-')} · 수신 ${esc(d.receivedAt || '-')}</div>
+    ${summary ? `<div style="margin-top:4px">${esc(summary)}</div>` : ''}
+    ${d.attachmentNote ? `<div class="muted" style="margin-top:4px;white-space:pre-line">${esc(d.attachmentNote)}</div>` : ''}
+  </div>`;
+}
+// Gmail 연동 상태·찾은 조건 안내 박스는 화면에 띄우지 않는다(요청에 따름) — 추출된 조건은 안내 없이
+// 그대로 보험료 산출 입력칸에 채워지고(premiumInputsFromSaved 참고), WARRANTY 텍스트만 보여준다.
+// 연동이 실패했을 때는 화면에 표시하지 않고 console에만 남긴다(refreshGmailSync 참고) — 기능은 그대로 자동 동작한다.
+// 평소엔 10분 주기 자동 확인만 하지만, 담당자가 기다리지 않고 바로 확인하고 싶을 때를 위한 버튼만 작게 둔다
+// (상태 문구·검색 결과 박스는 다시 넣지 않음).
 function quoteMailExtractSectionHtml(c) {
-  return warrantySectionHtml(c, false);
+  return `<p style="margin:0 0 8px"><button type="button" class="btn-text" data-act="gmail-sync-now"${gmailSyncBusy ? ' disabled' : ''}>${gmailSyncBusy ? '견적 메일 확인 중…' : '보험사 메일 지금 동기화'}</button></p>`
+    + warrantySectionHtml(c, false);
 }
 // 저장된 c.warranty.text(메일 원문 한 덩어리)를 줄 단위로 그대로 보여준다 — Gross/Net Rate·NCB 같은 요율 숫자도
 // 일부러 빼지 않고 원문 그대로 남긴다(요율·기간이 바뀐 수정 견적이 오면 그 내용도 그대로 반영된다). 빈 줄만 정리한다.
@@ -7473,6 +7564,9 @@ function onRequest(e) {
   setReqMsg(`「${caseLabel(c)}」 ${isQuote ? '견적 요청' : '부보 요청'}을 기획/ESG팀에 제출했습니다.`, 'ok');
   $('reqGoInbox').classList.remove('hidden');
   renderAll();
+  // 새 선박·항차가 등록된 그 자리에서 바로 한 번 찾아본다(10분 주기를 기다리지 않음) — 이 PC에
+  // gmail-sync 로컬 서버가 없으면 조용히 실패할 뿐이라 안전하다.
+  refreshGmailSync(true);
 }
 
 function renderAll() {
@@ -7835,7 +7929,7 @@ function sanitizeCase(o, usedIds) {
     quoteDraft: o.quoteDraft && typeof o.quoteDraft === 'object' ? {
       rawText: s(o.quoteDraft.rawText), pastedAt: s(o.quoteDraft.pastedAt), pastedBy: s(o.quoteDraft.pastedBy),
       vesselMatch: !!o.quoteDraft.vesselMatch, voyageMatch: !!o.quoteDraft.voyageMatch,
-      receivedAt: s(o.quoteDraft.receivedAt), from: s(o.quoteDraft.from),
+      receivedAt: s(o.quoteDraft.receivedAt), from: s(o.quoteDraft.from), attachmentNote: s(o.quoteDraft.attachmentNote),
       terms: o.quoteDraft.terms && typeof o.quoteDraft.terms === 'object' ? {
         grossRate: n(o.quoteDraft.terms.grossRate), netRate: n(o.quoteDraft.terms.netRate),
         ratePeriod: n(o.quoteDraft.terms.ratePeriod), upfrontNcbPct: n(o.quoteDraft.terms.upfrontNcbPct),
